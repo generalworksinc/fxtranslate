@@ -9,6 +9,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Byte-fallback pieces decode to characters.** `SpmVocab::decode` (and
+  `decode_with_offsets`) pushed each piece as written, so a character the model
+  spells in bytes — a symbol outside the vocabulary, as in a list of CJK
+  punctuation — came out as the literal text `<0xE2><0x80><0x99>`. A run of
+  byte pieces now decodes to the characters its bytes make, an invalid or
+  incomplete sequence as U+FFFD, as SentencePiece does; in the offsets the
+  characters sit on the run's first id. Seen with en→ja on an English page
+  listing Chinese punctuation. Pinned by
+  `spm::tests::byte_fallback_pieces_decode_to_their_characters`.
 - **No SIGILL on CPUs without the SIMD kernel's instructions.** `build.rs`
   compiles the gemmology shim with `-mavx2` (x86_64) or `-march=armv8.4-a+i8mm`
   (aarch64) whatever machine will run it, and nothing checked the CPU at run time,

@@ -293,21 +293,47 @@ impl SpmVocab {
             .unwrap_or("")
     }
 
-    /// Decode token ids back to text: concatenate pieces, turn `▁` into spaces,
-    /// strip the leading space, and skip control/unknown pieces.
-    pub fn decode(&self, ids: &[u32]) -> String {
-        let mut out = String::new();
-        for &id in ids {
-            let t = self
-                .types
+    /// Each id's text when decoding: its piece; control and unknown pieces none;
+    /// a run of byte-fallback pieces (`<0xNN>`) the characters its bytes make (an
+    /// invalid or incomplete sequence as U+FFFD, as SentencePiece decodes it), all
+    /// on the run's first id and none on the rest. Without this a character the
+    /// model spells in bytes (a symbol outside the vocabulary) came out as the
+    /// literal text `<0xE2><0x80><0x99>`.
+    fn piece_texts(&self, ids: &[u32]) -> Vec<String> {
+        let kind = |id: u32| {
+            self.types
                 .get(id as usize)
                 .copied()
-                .unwrap_or(PieceType::Normal);
-            if t == PieceType::Control || t == PieceType::Unknown {
-                continue;
+                .unwrap_or(PieceType::Normal)
+        };
+        let mut out = Vec::with_capacity(ids.len());
+        let mut i = 0;
+        while i < ids.len() {
+            match kind(ids[i]) {
+                PieceType::Control | PieceType::Unknown => out.push(String::new()),
+                PieceType::Byte => {
+                    let mut bytes = Vec::new();
+                    let start = i;
+                    while i < ids.len() && kind(ids[i]) == PieceType::Byte {
+                        bytes.extend(parse_byte_piece(self.piece(ids[i])));
+                        i += 1;
+                    }
+                    out.push(String::from_utf8_lossy(&bytes).into_owned());
+                    out.extend((start + 1..i).map(|_| String::new()));
+                    continue;
+                }
+                _ => out.push(self.piece(ids[i]).to_string()),
             }
-            out.push_str(self.piece(id));
+            i += 1;
         }
+        out
+    }
+
+    /// Decode token ids back to text: concatenate pieces (byte-fallback pieces
+    /// as the characters their bytes make), turn `▁` into spaces, strip the
+    /// leading space, and skip control/unknown pieces.
+    pub fn decode(&self, ids: &[u32]) -> String {
+        let out: String = self.piece_texts(ids).concat();
         out.replace(SPACE, " ").trim_start().to_string()
     }
 
@@ -325,16 +351,9 @@ impl SpmVocab {
         // Build the raw concatenation and each id's byte range within it.
         let mut raw = String::new();
         let mut raw_ranges: Vec<Range<usize>> = Vec::with_capacity(ids.len());
-        for &id in ids {
+        for piece in self.piece_texts(ids) {
             let start = raw.len();
-            let t = self
-                .types
-                .get(id as usize)
-                .copied()
-                .unwrap_or(PieceType::Normal);
-            if !(t == PieceType::Control || t == PieceType::Unknown) {
-                raw.push_str(self.piece(id));
-            }
+            raw.push_str(&piece);
             raw_ranges.push(start..raw.len());
         }
 
@@ -721,6 +740,37 @@ mod tests {
         assert_eq!(&text[ranges[3].clone()], " world");
         // Ranges tile the output contiguously in order.
         assert_eq!(ranges[3].end, text.len());
+    }
+
+    #[test]
+    fn byte_fallback_pieces_decode_to_their_characters() {
+        // "▁a", then ’ (U+2019) spelled in bytes, then "s"; a lone byte that
+        // makes no character becomes U+FFFD.
+        let mut pieces: Vec<String> = vec!["<ctrl>".into(), "\u{2581}a".into(), "s".into()];
+        pieces.extend((0..=255u32).map(|b| format!("<0x{b:02X}>")));
+        let mut types = vec![PieceType::Control, PieceType::Normal, PieceType::Normal];
+        types.extend(std::iter::repeat_n(PieceType::Byte, 256));
+        let vocab = SpmVocab {
+            scores: vec![0.0; pieces.len()],
+            pieces,
+            types,
+            by_piece: HashMap::new(),
+            eos_id: 0,
+            unk_id: 0,
+            max_piece_bytes: 8,
+            min_score: 0.0,
+            normalizer: Normalizer::from_spec(&[]),
+            byte_pieces: Box::new([None; 256]),
+        };
+        let byte = |b: u32| 3 + b;
+        let ids = [1, byte(0xE2), byte(0x80), byte(0x99), 2, byte(0xFF)];
+        assert_eq!(vocab.decode(&ids), "a\u{2019}s\u{FFFD}");
+        // The offsets agree: the character on the run's first id, none on the rest.
+        let (text, ranges) = vocab.decode_with_offsets(&ids);
+        assert_eq!(text, vocab.decode(&ids));
+        assert_eq!(&text[ranges[1].clone()], "\u{2019}");
+        assert!(ranges[2].is_empty() && ranges[3].is_empty());
+        assert_eq!(&text[ranges[4].clone()], "s");
     }
 
     #[test]
