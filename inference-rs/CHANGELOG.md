@@ -9,6 +9,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Byte-fallback pieces decode to characters.** `SpmVocab::decode` (and
+  `decode_with_offsets`) pushed each piece as written, so a character the model
+  spells in bytes — a symbol outside the vocabulary, as in a list of CJK
+  punctuation — came out as the literal text `<0xE2><0x80><0x99>`. A run of
+  byte pieces now decodes to the characters its bytes make, an invalid or
+  incomplete sequence as U+FFFD, as SentencePiece does; in the offsets the
+  characters sit on the run's first id. Seen with en→ja on an English page
+  listing Chinese punctuation. Pinned by
+  `spm::tests::byte_fallback_pieces_decode_to_their_characters`.
+
 - **Decoder first-step seeding.** The decoder embedded its seed token (`eos`) at
   position 0, but marian zero-pads there: it builds the decoder input by shifting
   the target embeddings right and zero-padding the vacated first slot
