@@ -58,15 +58,20 @@ fn main() {
 
     // Pick the arch-specific xsimd kernel + the `-m` flags to compile it with. The
     // define selects the `Arch` in the shim (see gemmology_shim.cpp). Targets not
-    // listed here have no wired kernel and fall back to the scalar path.
-    let (arch_define, arch_flag) = match arch.as_str() {
+    // listed here have no wired kernel and fall back to the scalar path. MSVC takes
+    // its own flags (it ignores `-m…`, and the shim then failed to build, so
+    // Windows silently ran the scalar kernel).
+    let msvc = std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+    let (arch_define, arch_flag) = match (arch.as_str(), msvc) {
         // -march=armv8.4-a+i8mm enables __ARM_FEATURE_MATMUL_INT8 (usdot).
-        "aarch64" => ("FXT_GEMM_I8MM", "-march=armv8.4-a+i8mm"),
+        ("aarch64", false) => ("FXT_GEMM_I8MM", "-march=armv8.4-a+i8mm"),
         // AVX2 baseline: runs on every x86-64-v2+ CPU. The exact VNNI kernels
         // behind CPUID dispatch are a possible follow-up.
-        "x86_64" => ("FXT_GEMM_AVX2", "-mavx2"),
+        ("x86_64", false) => ("FXT_GEMM_AVX2", "-mavx2"),
+        // /arch:AVX2 defines __AVX2__ for xsimd, as -mavx2 does.
+        ("x86_64", true) => ("FXT_GEMM_AVX2", "/arch:AVX2"),
         _ => {
-            bail(format!("no SIMD kernel wired for `{arch}` yet"));
+            bail(format!("no SIMD kernel wired for `{arch}`{} yet", if msvc { " with MSVC" } else { "" }));
             return;
         }
     };

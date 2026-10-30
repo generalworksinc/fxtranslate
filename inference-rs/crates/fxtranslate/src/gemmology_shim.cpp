@@ -26,6 +26,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#ifdef _MSC_VER
+#include <malloc.h>  // _aligned_malloc / _aligned_free: MSVC has no std::aligned_alloc
+#endif
 
 #ifdef FXT_GEMM_THREADS
 // Intra-op GEMM parallelism (feature `gemm-threads`): a persistent thread pool
@@ -72,10 +75,23 @@ inline size_t round_up(size_t x, size_t m) { return (x + m - 1) / m * m; }
 
 // Aligned allocation sized for SIMD stores. std::aligned_alloc requires the
 // size to be a multiple of the alignment, so round it up; never return null for
-// a zero request.
+// a zero request. Freed only by aligned_free: MSVC's _aligned_malloc memory
+// cannot go to free.
 inline void *aligned(size_t bytes) {
   size_t n = round_up(bytes ? bytes : 1, 64);
+#ifdef _MSC_VER
+  return _aligned_malloc(n, 64);
+#else
   return std::aligned_alloc(64, n);
+#endif
+}
+
+inline void aligned_free(void *p) {
+#ifdef _MSC_VER
+  _aligned_free(p);
+#else
+  std::free(p);
+#endif
 }
 
 struct PreparedB {
@@ -226,7 +242,7 @@ void *gemmology_prepare_b(const int8_t *b_transposed, size_t n, size_t k) {
   int8_t *packed = static_cast<int8_t *>(aligned(n_pad * k));
   gemmology::PrepareBQuantizedTransposed<Arch>(src, packed, /*cols=*/k,
                                                /*rows=*/n_pad);
-  std::free(src);
+  aligned_free(src);
 
   g_prepared_bytes.fetch_add(n_pad * k, std::memory_order_relaxed);
   return new PreparedB{packed, n, n_pad, k};
@@ -236,7 +252,7 @@ void gemmology_free_b(void *handle) {
   if (!handle) return;
   PreparedB *h = static_cast<PreparedB *>(handle);
   g_prepared_bytes.fetch_sub(h->n_pad * h->k, std::memory_order_relaxed);
-  std::free(h->data);
+  aligned_free(h->data);
   delete h;
 }
 
@@ -324,9 +340,9 @@ void gemmology_multiply(void *handle, const uint8_t *a, size_t m, float unquant,
   for (size_t r = 0; r < m; ++r)
     std::memcpy(out + r * n, out_al + r * n_pad, n * sizeof(float));
 
-  std::free(a_al);
-  std::free(bias_al);
-  std::free(out_al);
+  aligned_free(a_al);
+  aligned_free(bias_al);
+  aligned_free(out_al);
 }
 
 }  // extern "C"
